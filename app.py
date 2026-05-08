@@ -5,111 +5,88 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 # Konfigurasi Halaman
-st.set_page_config(page_title="Retail Product Recommender", layout="wide")
+st.set_page_config(page_title="Retail Recommender", layout="wide")
 
-# --- STYLE ---
-st.markdown("""
-    <style>
-    .main { background-color: #f5f7f9; }
-    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- FUNGSI LOAD & PREPROCESSING ---
 @st.cache_data
 def load_and_clean_data(file_path):
-    # Load data
+    # Membaca data Excel
     df = pd.read_excel(file_path)
     
-    # Cleaning
-    df_clean = df.dropna(subset=['Description']).copy()
-    df_clean = df_clean[~df_clean['InvoiceNo'].astype(str).str.startswith('C')]
-    df_clean = df_clean[(df_clean['Quantity'] > 0) & (df_clean['UnitPrice'] > 0)]
+    # 1. Bersihkan data dasar
+    df = df.dropna(subset=['Description'])
+    df = df[~df['InvoiceNo'].astype(str).str.startswith('C')]
+    df['Description'] = df['Description'].str.strip().str.upper()
     
-    # Create Product Catalog
-    df_products = df_clean.groupby('StockCode').agg(
-        Description=('Description', lambda x: x.mode()[0]),
-        TotalSold=('Quantity', 'sum'),
-        UnitPrice=('UnitPrice', 'mean')
-    ).reset_index()
+    # 2. KRUSIAL: Ambil Produk Unik berdasarkan StockCode
+    # Ini mengurangi data dari 540rb baris menjadi ~3.800 baris saja.
+    # Tanpa ini, Streamlit Cloud akan kehabisan RAM (Crash).
+    df_unique = df.drop_duplicates(subset=['StockCode']).copy()
     
-    df_products['Description'] = df_products['Description'].str.strip().str.upper()
-    # Filter produk dengan deskripsi minimal 3 kata
-    df_products = df_products[df_products['Description'].str.split().str.len() >= 3]
-    return df_products.reset_index(drop=True)
+    # Filter deskripsi yang terlalu pendek
+    df_unique = df_unique[df_unique['Description'].str.split().str.len() >= 2]
+    
+    return df_unique.reset_index(drop=True)
 
 @st.cache_resource
 def compute_similarity(descriptions):
+    # Menggunakan TF-IDF untuk mengubah deskripsi menjadi angka
     tfidf = TfidfVectorizer(stop_words='english', ngram_range=(1, 2))
     tfidf_matrix = tfidf.fit_transform(descriptions)
-    sim_matrix = cosine_similarity(tfidf_matrix, tfidf_matrix)
+    
+    # Hitung kemiripan dan ubah ke float16 untuk menghemat memori
+    sim_matrix = cosine_similarity(tfidf_matrix).astype(np.float16)
     return sim_matrix
 
-# --- SIDEBAR ---
-st.sidebar.title("⚙️ Konfigurasi")
-top_n = st.sidebar.slider("Jumlah Rekomendasi", 1, 10, 5)
-
-# --- MAIN APP ---
-st.title("🛒 Product Recommendation System")
-st.markdown("Sistem rekomendasi berbasis **konten (deskripsi)** menggunakan TF-IDF & Cosine Similarity.")
+# --- Tampilan Utama ---
+st.title("🛒 Online Retail Product Recommender")
+st.markdown("Cari produk untuk mendapatkan rekomendasi item serupa berdasarkan deskripsi.")
 
 try:
-    # Load Data
-    with st.spinner('Memproses data retail...'):
+    with st.spinner('Menyiapkan data (ini hanya dilakukan sekali)...'):
+        # Pastikan file Online Retail.xlsx ada di GitHub
         df_products = load_and_clean_data('Online Retail.xlsx')
         cosine_sim = compute_similarity(df_products['Description'])
 
-    # --- PENCARIAN ---
-    st.subheader("🔍 Cari & Pilih Produk")
-    search_query = st.text_input("Masukkan kata kunci produk (contoh: BAG, HEART, CANDLE)", "")
+    # Input Pencarian
+    search_query = st.text_input("Cari nama produk (contoh: BAG, HEART, BOTTLE):", "").upper()
 
-    # Filter produk berdasarkan search
-    filtered_products = df_products[df_products['Description'].str.contains(search_query.upper())] if search_query else df_products
+    # Filter pilihan berdasarkan pencarian
+    if search_query:
+        options_df = df_products[df_products['Description'].str.contains(search_query)]
+    else:
+        options_df = df_products
 
-    if not filtered_products.empty:
-        # User memilih produk dari hasil pencarian
-        product_options = filtered_products.apply(lambda x: f"{x['StockCode']} - {x['Description']}", axis=1).tolist()
-        selected_option = st.selectbox("Pilih produk spesifik untuk melihat rekomendasi:", product_options)
+    if not options_df.empty:
+        # Pilihan Produk
+        selection_list = options_df.apply(lambda x: f"{x['StockCode']} - {x['Description']}", axis=1).tolist()
+        selected_item = st.selectbox("Pilih produk spesifik:", selection_list)
         
-        selected_stock_code = selected_option.split(" - ")[0]
-        
-        # Ambil detail produk yang dipilih
+        # Ambil index produk yang dipilih
+        selected_stock_code = selected_item.split(" - ")[0]
         idx = df_products.index[df_products['StockCode'] == selected_stock_code].tolist()[0]
-        selected_item = df_products.loc[idx]
 
-        # Tampilkan Detail Produk Terpilih
-        st.info(f"**Produk Terpilih:** {selected_item['Description']}")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("StockCode", selected_item['StockCode'])
-        col2.metric("Harga Rata-rata", f"£{selected_item['UnitPrice']:.2f}")
-        col3.metric("Total Terjual", f"{int(selected_item['TotalSold'])} unit")
+        # Tampilkan Produk Terpilih
+        st.success(f"Menampilkan rekomendasi untuk: **{df_products.iloc[idx]['Description']}**")
 
-        st.divider()
-
-        # --- HITUNG REKOMENDASI ---
-        st.subheader(f"✨ {top_n} Produk Serupa yang Mungkin Anda Sukai")
-        
-        # Ambil skor kemiripan
+        # Hitung Top 5 Rekomendasi
         sim_scores = list(enumerate(cosine_sim[idx]))
         sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
-        sim_scores = sim_scores[1:top_n + 1] # Ambil top N, skip produk itu sendiri
+        sim_scores = sim_scores[1:6] # Ambil 5 teratas selain dirinya sendiri
 
-        product_indices = [i[0] for i in sim_scores]
-        similarity_scores = [i[1] for i in sim_scores]
-
-        # Tampilkan Hasil dalam Tabel
-        results = df_products.iloc[product_indices][['StockCode', 'Description', 'UnitPrice', 'TotalSold']].copy()
-        results['Similarity Score'] = [f"{round(s*100, 2)}%" for s in similarity_scores]
+        # Tampilkan Hasil
+        st.subheader("Produk Serupa yang Direkomendasikan:")
+        cols = st.columns(5)
         
-        st.table(results.reset_index(drop=True))
-
+        for i, (index, score) in enumerate(sim_scores):
+            item = df_products.iloc[index]
+            with cols[i]:
+                st.info(f"**{item['Description']}**")
+                st.write(f"Kode: {item['StockCode']}")
+                st.write(f"Kemiripan: {float(score)*100:.1f}%")
     else:
-        st.warning("Produk tidak ditemukan. Coba kata kunci lain.")
+        st.warning("Produk tidak ditemukan, coba kata kunci lain.")
 
 except FileNotFoundError:
-    st.error("File 'Online Retail.xlsx' tidak ditemukan! Pastikan file berada di folder yang sama.")
+    st.error("Error: File 'Online Retail.xlsx' tidak ditemukan di repositori GitHub.")
 except Exception as e:
-    st.error(f"Terjadi kesalahan: {e}")
-
-# Footer
-st.caption("Data: Online Retail Dataset | Metode: Content-Based Filtering")
+    st.error(f"Terjadi kesalahan teknis: {e}")
